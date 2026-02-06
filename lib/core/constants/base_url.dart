@@ -1,0 +1,3 @@
+final baseUrl = "https://backend.defcomm.ng/api";
+
+final videoDevTokenKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcGlrZXkiOiI0ZGM0OGM1Mi1mOGZjLTRmYTUtOGM0NC1mNjJmNTZlNGQ1MTEiLCJwZXJtaXNzaW9ucyI6WyJhbGxvd19qb2luIl0sImlhdCI6MTc2NDYwNjg2NiwiZXhwIjoxOTIyMzk0ODY2fQ.hAx0OrpswBT638oY_w_MDCnFOSEhTdeOjHnGBC79S3w";

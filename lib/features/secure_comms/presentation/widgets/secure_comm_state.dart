@@ -1,0 +1,4 @@
+enum SecureCommsView {
+  showingList,
+  showingOtpVerification,
+}
