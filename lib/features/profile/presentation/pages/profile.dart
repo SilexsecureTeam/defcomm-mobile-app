@@ -69,7 +69,7 @@ class _ProfileState extends State<Profile> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const SizedBox(height: 20),
+                        const SizedBox(height: 36),
 
                         // --- STATIC HEADER (Always Visible) ---
                         _buildProfileHeader(name, initials),

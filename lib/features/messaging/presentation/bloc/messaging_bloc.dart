@@ -14,7 +14,9 @@ import '../../../../core/usecase/usecase.dart';
 import '../../../../core/error/failures.dart';
 import 'messaging_event.dart';
 import 'messaging_state.dart';
+import 'package:defcomm/features/calling/call_control_constants.dart';
 import 'package:flutter/material.dart';
+import 'package:get_storage/get_storage.dart';
 
 class MessagingBloc extends Bloc<MessagingEvent, MessagingState> {
   final FetchStories _fetchStories;
@@ -24,6 +26,37 @@ class MessagingBloc extends Bloc<MessagingEvent, MessagingState> {
   final GetCachedStories _getCachedStories;
   final GetCachedMessageThreads _getCachedThreads;
   final GetCachedGroups _getCachedGroups;
+
+  // Tracks thread IDs the user has explicitly opened (read).
+  // Persisted to GetStorage so badge stays gone after an app restart.
+  static const _kReadIdsKey = 'messaging_read_thread_ids';
+  final Set<String> _localReadThreadIds = {};
+  final _box = GetStorage();
+
+  // Set to true by _onNewThreadCreated when a real Pusher message reorders
+  // the list. Checked by _onFetchThreads so it merges rather than replaces.
+  bool _pusherReorderedSinceLastFetch = false;
+
+  static bool _isCallControlMsg(String? msg) {
+    if (msg == null || msg.isEmpty) return false;
+    return msg.startsWith(kCallControlInvitePrefix) ||
+        msg == kCallControlRejected ||
+        msg == kCallControlEnded ||
+        msg == kCallControlAccepted ||
+        msg == 'voice_call' ||
+        msg == 'call_accepted';
+  }
+
+  void _persistReadIds() {
+    _box.write(_kReadIdsKey, _localReadThreadIds.toList());
+  }
+
+  void _loadReadIds() {
+    final raw = _box.read(_kReadIdsKey);
+    if (raw is List) {
+      _localReadThreadIds.addAll(raw.map((e) => e.toString()));
+    }
+  }
 
   MessagingBloc({
     required FetchStories fetchStories,
@@ -57,6 +90,7 @@ class MessagingBloc extends Bloc<MessagingEvent, MessagingState> {
          threadsLoading: true,
          groupsLoading: true,
        )) {
+    _loadReadIds();
     on<FetchStoriesEvent>(_onFetchStories);
     on<FetchMessageThreadsEvent>(_onFetchThreads);
     on<NewThreadCreatedEvent>(_onNewThreadCreated);
@@ -127,7 +161,10 @@ class MessagingBloc extends Bloc<MessagingEvent, MessagingState> {
 
     final cachedResult = await _getCachedThreads();
     cachedResult.fold((failure) {}, (threads) {
-      if (threads.isNotEmpty) {
+      // Only show cached threads as placeholder if the live state has none.
+      // If live threads are already present (set by NewThreadCreatedEvent),
+      // emitting the stale cache order causes the visible flicker/reorder.
+      if (threads.isNotEmpty && state.threads.isEmpty) {
         final threadList = List<MessageThread>.from(threads);
         emit(state.copyWith(threads: threadList, threadsLoading: true));
       }
@@ -149,14 +186,55 @@ class MessagingBloc extends Bloc<MessagingEvent, MessagingState> {
       },
       (threads) {
         var threadList = List<MessageThread>.from(threads);
-         if (event.markedReadThreadId != null) {
+        if (event.markedReadThreadId != null) {
+          threadList = threadList.map((t) {
+            if (t.id == event.markedReadThreadId.toString()) {
+              return t.copyWith(unRead: 0);
+            }
+            return t;
+          }).toList();
+        }
+        // Zero unread for threads whose last message is a call control signal.
+        // The server counts call invite/reject/ended messages as unread — they
+        // are not real chat messages and should never show a badge.
         threadList = threadList.map((t) {
-          if (t.id == event.markedReadThreadId.toString()) {
+          if (_isCallControlMsg(t.lastMessage)) {
             return t.copyWith(unRead: 0);
           }
           return t;
         }).toList();
-      }
+
+        // Preserve locally-read threads: if the user already opened this
+        // thread, don't let a stale server count re-show the unread badge.
+        if (_localReadThreadIds.isNotEmpty) {
+          threadList = threadList.map((t) {
+            if (_localReadThreadIds.contains(t.id.toString())) {
+              return t.copyWith(unRead: 0);
+            }
+            return t;
+          }).toList();
+        }
+        // If a Pusher event reordered threads while this fetch was in-flight,
+        // merge server content into the current in-memory order instead of
+        // replacing it — avoids the "thread jumps to top then snaps back" bug.
+        if (_pusherReorderedSinceLastFetch && state.threads.isNotEmpty) {
+          _pusherReorderedSinceLastFetch = false;
+          final serverById = {for (final t in threadList) t.id: t};
+          final existingIds = state.threads.map((t) => t.id).toSet();
+          // New threads from server not yet in memory → prepend them
+          final newFromServer =
+              threadList.where((t) => !existingIds.contains(t.id)).toList();
+          // Update content of existing threads, preserving in-memory order
+          threadList = [
+            ...newFromServer,
+            ...state.threads.map((t) => serverById[t.id] ?? t),
+          ];
+        } else {
+          _pusherReorderedSinceLastFetch = false;
+        }
+
+        // API already returns threads ordered by most-recent message.
+        // Do NOT sort by unRead count — that scrambles recency order.
         emit(
           state.copyWith(
             threads: threadList,
@@ -167,72 +245,6 @@ class MessagingBloc extends Bloc<MessagingEvent, MessagingState> {
       },
     );
   }
-
-  // Future<void> _onNewThreadCreated(
-  //   NewThreadCreatedEvent event,
-  //   Emitter<MessagingState> emit,
-  // ) async {
-  //   final incomingThread = event.thread;
-
-  //   final existingIndex = state.threads.indexWhere((t) {
-      
-  //     // A. Check Thread ID (Primary Key)
-  //     if (t.id.toString() == incomingThread.id.toString()) return true;
-
-  //     // B. Check Chat ID (If available)
-  //     if (t.chatId != null && incomingThread.chatId != null) {
-  //       if (t.chatId.toString() == incomingThread.chatId.toString()) return true;
-  //     }
-
-  //     // C. Check Conversation Partners (The most reliable for 1-on-1)
-  //     // "Is this a chat with the same person?"
-  //     if (t.chatUserToId != null && incomingThread.chatUserToId != null) {
-  //       if (t.chatUserToId.toString() == incomingThread.chatUserToId.toString()) return true;
-  //     }
-
-  //     return false;
-  //   });
-
-  //   // Create a modifiable copy of the list
-  //   final updatedList = List<MessageThread>.from(state.threads);
-
-  //   if (existingIndex != -1) {
-  //     // --- ✅ UPDATE EXISTING THREAD ---
-  //     final existingThread = updatedList[existingIndex];
-
-  //     // Calculate unread count logic
-  //     int newCount = existingThread.unRead ?? 0;
-  //     if (event.shouldResetCount) {
-  //       newCount = 0; 
-  //     } else if (event.shouldIncrementCount) {
-  //       newCount = newCount + 1;
-  //     }
-
-  //     // Merge Data
-  //     // We use 'existingThread' as the base to PRESERVE the correct name/image
-  //     // We only overwrite the 'lastMessage', 'isFile', and 'unRead' from incoming.
-  //     final mergedThread = existingThread.copyWith(
-  //       unRead: newCount,
-  //       lastMessage: incomingThread.lastMessage,
-  //       isFile: incomingThread.isFile,
-  //       // Don't overwrite name/image unless necessary logic dictates it
-  //     );
-
-  //     // Move to Top (Since it has a new message)
-  //     updatedList.removeAt(existingIndex);
-  //     updatedList.insert(0, mergedThread);
-      
-  //   } else {
-  //     // --- 🆕 NEW THREAD ---
-  //     final newThread = incomingThread.copyWith(
-  //       unRead: event.shouldResetCount ? 0 : (event.shouldIncrementCount ? 1 : 0),
-  //     );
-
-  //     updatedList.insert(0, newThread);
-  //   }
-
-  //   emit(state.copyWith(threads: updatedList));
-  // }
 
   Future<void> _onNewThreadCreated(
     NewThreadCreatedEvent event,
@@ -266,6 +278,9 @@ class MessagingBloc extends Bloc<MessagingEvent, MessagingState> {
         newCount = 0; 
       } 
       else if (event.shouldIncrementCount) {
+        // A real new message arrived — clear the read flag so the badge shows.
+        _localReadThreadIds.remove(existingThread.id.toString());
+        _persistReadIds();
         newCount = newCount + 1;
       }
       final mergedThread = existingThread.copyWith(
@@ -276,6 +291,7 @@ class MessagingBloc extends Bloc<MessagingEvent, MessagingState> {
 
       updatedList.removeAt(existingIndex);
       updatedList.insert(0, mergedThread);
+      if (event.shouldIncrementCount) _pusherReorderedSinceLastFetch = true;
       
     } else {
 
@@ -298,6 +314,10 @@ class MessagingBloc extends Bloc<MessagingEvent, MessagingState> {
   
   
   void _onThreadRead(ThreadRead event, Emitter<MessagingState> emit) {
+    // Remember this thread so future API fetches don't re-show stale counts.
+    _localReadThreadIds.add(event.threadId.toString());
+    _persistReadIds();
+
     final updatedThreads = state.threads.map((t) {
       if (t.id == event.threadId) {
         return t.copyWith(unRead: 0);

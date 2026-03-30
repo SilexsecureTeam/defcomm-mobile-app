@@ -22,6 +22,7 @@ import 'package:defcomm/features/groups/presentation/bloc/group_member_bloc.dart
 import 'package:defcomm/features/settings/presentation/bloc/settings_bloc.dart';
 import 'package:defcomm/features/settings/presentation/bloc/settings_state.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -167,6 +168,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarContrastEnforced: false,
+    ));
     return Scaffold(
       backgroundColor: AppColors.tertiaryGreen,
       body: SafeArea(
@@ -375,7 +382,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   Widget _buildAppBar(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.fromLTRB(16, 32, 16, 8),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [

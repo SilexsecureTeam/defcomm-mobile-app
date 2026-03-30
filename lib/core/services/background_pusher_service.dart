@@ -1,39 +1,15 @@
-// import 'dart:async';
-// import 'dart:convert';
-// import 'dart:ui';
-// import 'package:defcomm/features/calling/call_control_constants.dart';
-// import 'package:flutter/services.dart';
-// import 'package:flutter_background_service/flutter_background_service.dart';
-// import 'package:flutter_callkit_incoming/entities/android_params.dart';
-// import 'package:flutter_callkit_incoming/entities/call_kit_params.dart';
-// import 'package:flutter_callkit_incoming/entities/ios_params.dart';
-// import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-// import 'package:pusher_client_fixed/pusher_client_fixed.dart';
+import 'dart:async';
+import 'dart:convert';
+import 'dart:ui';
+import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_callkit_incoming/entities/android_params.dart';
 import 'package:flutter_callkit_incoming/entities/call_kit_params.dart';
 import 'package:flutter_callkit_incoming/entities/ios_params.dart';
+import 'package:flutter_callkit_incoming/entities/notification_params.dart';
 import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
-
-import 'dart:async';
-import 'dart:convert';
-import 'dart:ui';
-import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:pusher_client_fixed/pusher_client_fixed.dart';
-import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
 import 'package:get_storage/get_storage.dart';
-
-
-import 'dart:async';
-import 'dart:convert';
-import 'dart:ui';
-import 'package:flutter_background_service/flutter_background_service.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:pusher_client_fixed/pusher_client_fixed.dart';
-import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
-import 'package:get_storage/get_storage.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
 
 // CONFIG
 const String kAppKey = 'l4ewjdxj5hilgin4smsv';
@@ -46,6 +22,9 @@ String _subscriptionStatus = "Waiting...";
 String _lastEvent = "None";
 
 bool _isAppInForeground = false;
+
+// Module-level reference so _handleBackgroundMessage can signal the UI isolate.
+ServiceInstance? _serviceInstance;
 
 Future<void> initializeBackgroundService(
   String token,
@@ -63,8 +42,11 @@ Future<void> initializeBackgroundService(
   const AndroidNotificationChannel channel = AndroidNotificationChannel(
     'my_foreground',
     'Defcomm Active',
-    description: 'Listening for calls...',
-    importance: Importance.low,
+    description: 'Listening for calls and messages...',
+    importance: Importance.high,
+    playSound: false,
+    enableVibration: false,
+    showBadge: false,
   );
 
   final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
@@ -93,12 +75,12 @@ Future<void> initializeBackgroundService(
 
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
+  _serviceInstance = service;
   DartPluginRegistrant.ensureInitialized();
-  try {
-    await WakelockPlus.enable();
-  } catch (e) {
-    print("Wakelock error: $e");
-  }
+  // NOTE: WakelockPlus keeps the SCREEN on (FLAG_KEEP_SCREEN_ON), which is
+  // useless and drains battery when the screen is already off. A foreground
+  // service with PARTIAL_WAKE_LOCK is the correct approach — Android provides
+  // it automatically for foreground services. Do NOT call WakelockPlus here.
 
   // 1. INIT NOTIFICATIONS
   final FlutterLocalNotificationsPlugin localNotif =
@@ -115,6 +97,9 @@ void onStart(ServiceInstance service) async {
     'Messages',
     importance: Importance.max,
     playSound: true,
+    enableVibration: true,
+    showBadge: true,
+    enableLights: true,
   );
 
   service.on('setAsForeground').listen((event) {
@@ -131,11 +116,16 @@ void onStart(ServiceInstance service) async {
     _isAppInForeground = false;
   });
 
-  await localNotif
-      .resolvePlatformSpecificImplementation<
-        AndroidFlutterLocalNotificationsPlugin
-      >()
-      ?.createNotificationChannel(messageChannel);
+  try {
+    await localNotif
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >()
+        ?.createNotificationChannel(messageChannel);
+    print("✅ Background Service: Message notification channel created");
+  } catch (e) {
+    print("⚠️ Background Service: Failed to create message channel: $e");
+  }
 
   print("🔥🔥🔥 BACKGROUND SERVICE STARTED 🔥🔥🔥");
 
@@ -155,66 +145,67 @@ void onStart(ServiceInstance service) async {
     pusher = await _setupPusher(token, userId, groupIds, localNotif);
   }
 
-  // 3. SAFE DIAGNOSTIC TIMER (Uses separate notification, guaranteed to work)
-  Timer.periodic(const Duration(seconds: 5), (timer) async {
+  // 3. FCM-TRIGGERED PUSHER RECONNECT
+  // When FCM wakes the device from Doze, the background handler calls
+  // service.invoke('forcePusherReconnect'). This re-establishes the Pusher
+  // socket so the device is ready for the next real-time event.
+  // (A periodic watchdog timer is NOT used because Android Doze defers
+  //  all timers, making them useless exactly when we need them most.)
+  service.on('forcePusherReconnect').listen((event) async {
+    // Wake the screen immediately so the device stays alive long enough for
+    // Pusher to reconnect and deliver any queued call/message events.
+    service.invoke('wakeScreen');
     try {
-      // Create a specific channel for debug info so it doesn't make noise
-      const AndroidNotificationDetails debugDetails =
-          AndroidNotificationDetails(
-            'defcomm_debug',
-            'Debug Status',
-            importance: Importance.low,
-            priority: Priority.low,
-            ongoing: true, // Makes it sticky
-            autoCancel: false,
-          );
-
-      // Show Status in a separate notification (ID 999)
-      await localNotif.show(
-        999,
-        "Pusher Status: $_connectionStatus",
-        "Sub: $_subscriptionStatus | Last: $_lastEvent",
-        const NotificationDetails(android: debugDetails),
-      );
-
-      // Auto-Reconnect Watchdog
       if (_connectionStatus == 'DISCONNECTED' ||
-          _connectionStatus.startsWith('ERR')) {
-        print("⚠️ Watchdog: Disconnected. Attempting reconnect...");
+          _connectionStatus.startsWith('ERR') ||
+          _connectionStatus == 'Starting...') {
         final box = GetStorage();
         final token = box.read('accessToken');
         final userId = box.read('userEnId');
+        final List<String> groups =
+            (box.read('background_group_ids') as List?)?.cast<String>() ?? [];
         if (token != null && userId != null) {
-          connectToPusher(token, userId, []);
+          print("📡 forcePusherReconnect: reconnecting Pusher...");
+          await connectToPusher(token, userId, groups);
         }
+      } else {
+        print("📡 forcePusherReconnect: Pusher already connected ($_connectionStatus), skip");
       }
     } catch (e) {
-      print("Timer Error: $e");
+      print("forcePusherReconnect error: $e");
     }
   });
 
-
-  await GetStorage.init();
+  try {
+    await GetStorage.init();
+  } catch (e) {
+    print("⚠️ Background Service: GetStorage.init error: $e");
+  }
   final box = GetStorage();
 
   // Retry loop: Try 3 times to find the token
   for (int i = 0; i < 3; i++) {
-    final String? storedToken = box.read('accessToken');
-    final String? storedUserId = box.read('userEnId');
-    final List<String> storedGroups =
-        (box.read('background_group_ids') as List?)?.cast<String>() ?? [];
+    try {
+      final String? storedToken = box.read('accessToken');
+      final String? storedUserId = box.read('userEnId');
+      final List<String> storedGroups =
+          (box.read('background_group_ids') as List?)?.cast<String>() ?? [];
 
-    if (storedToken != null && storedUserId != null) {
-      await connectToPusher(storedToken, storedUserId, storedGroups);
-      _connectionStatus = "Connecting..."; // Update status for user to see
-      break; // Exit loop, we found data
-    } else {
-      _connectionStatus = "No Data (Retry ${i + 1})...";
-      await Future.delayed(const Duration(seconds: 2)); // Wait 2s before retry
+      print("🔑 Background Service retry $i: token=${storedToken != null}, userId=${storedUserId != null}, groups=${storedGroups.length}");
+
+      if (storedToken != null && storedUserId != null) {
+        await connectToPusher(storedToken, storedUserId, storedGroups);
+        _connectionStatus = "Connecting...";
+        break;
+      } else {
+        _connectionStatus = "No Data (Retry ${i + 1})...";
+        await Future.delayed(const Duration(seconds: 2));
+      }
+    } catch (e) {
+      print("❌ Background Service retry $i error: $e");
     }
   }
 
-  // If still failing after retries
   if (_connectionStatus.startsWith("No Data")) {
     _connectionStatus = "Waiting for Login...";
   }
@@ -263,8 +254,23 @@ Future<PusherClient> _setupPusher(
   PusherClient pusher = PusherClient(kAppKey, options, autoConnect: true);
 
   pusher.onConnectionStateChange((state) {
+    final prev = _connectionStatus;
     _connectionStatus = state?.currentState?.toUpperCase() ?? "UNKNOWN";
     print("📡 State: $_connectionStatus");
+    // Immediately try to reconnect the moment the connection drops,
+    // rather than waiting for the watchdog cycle.
+    if (_connectionStatus == 'DISCONNECTED' && prev != 'DISCONNECTED') {
+      Future.delayed(const Duration(seconds: 3), () {
+        if (_connectionStatus == 'DISCONNECTED') {
+          try {
+            pusher.connect();
+            print("🔄 Auto-reconnect triggered after disconnect");
+          } catch (e) {
+            print("⚠️ Auto-reconnect error: $e");
+          }
+        }
+      });
+    }
   });
 
   pusher.onConnectionError((error) {
@@ -313,12 +319,21 @@ void _handleBackgroundMessage(
   bool isGroup = false,
   String? channelName,
 }) async {
+  print("\n" + "="*60);
+  print("🔵 BACKGROUND SERVICE - Message Handler");
+  print("   Channel: $channelName");
+  print("   Is Group: $isGroup");
+  print("   My ID: $myId");
+  print("="*60);
+  
   try {
     _lastEvent = "1. Raw Data Recv";
+    print("📦 Raw data received (first 200 chars): ${rawData.substring(0, rawData.length > 200 ? 200 : rawData.length)}...");
 
     // 1. JSON DECODE
     final payload = jsonDecode(rawData);
     _lastEvent = "2. JSON Decoded";
+    print("✅ JSON decoded successfully");
 
     // 2. ROOT EXTRACTION
     final root = payload['data'] ?? payload;
@@ -352,22 +367,89 @@ void _handleBackgroundMessage(
     final String stateStr = (root['state'] ?? '').toString();
     _lastEvent = "6. Text Ready";
 
-    // CALL LOGIC
-    bool isCall = stateStr == 'call';
-    if (msgText.contains('__call_control__invite') ||
-        msgText.contains('CallControl|Invite'))
-      isCall = true;
+    // CALL LOGIC — dismiss UI first if caller ended/rejected/accepted
+    if (msgText == '__DEFCOMM_CALL_REJECTED_v1__' ||
+        msgText == '__DEFCOMM_CALL_ENDED_v1__' ||
+        msgText == 'call_accepted') {
+      try {
+        await FlutterCallkitIncoming.endAllCalls();
+      } catch (e) {
+        print('⚠️ endAllCalls error: $e');
+      }
+      return;
+    }
+
+    // Detect call invite by message content OR by mssType='call' with
+    // 'voice_call' body (the format sent by RecentCallsScreen._onCallPressed).
+    final bool isCall = msgText.contains('__call_control__invite') ||
+        msgText.contains('CallControl|Invite') ||
+        (msgText == 'voice_call' && stateStr == 'call') ||
+        stateStr == 'call';
+
+    print("🔍 Message type check:");
+    print("   State: $stateStr");
+    print("   Is Call: $isCall");
+    print("   Is My Message: $isMyMsg");
 
     if (isCall) {
       if (isMyMsg) {
         _lastEvent = "Ignored: My Call";
+        print("⏭️ Ignoring - this is my own call");
         return;
       }
-
-      _lastEvent = "7. Call Detected";
-      // ... CallKit Logic ...
-      // (Simplified for debug test)
-      _lastEvent = "Call UI Triggered";
+      // Extract meetingId from the invite prefix if present.
+      String meetingId = '';
+      if (msgText.contains('__call_control__invite|')) {
+        final parts = msgText.split('|');
+        if (parts.length >= 2) meetingId = parts[1].trim();
+      }
+      if (meetingId.isEmpty) {
+        meetingId = DateTime.now().millisecondsSinceEpoch.toString();
+      }
+      print("📞 Call detected — showing CallKit. caller=$senderName meetingId=$meetingId");
+      _lastEvent = "Call → CallKit";
+      try {
+        await FlutterCallkitIncoming.showCallkitIncoming(CallKitParams(
+          id: meetingId,
+          nameCaller: senderName,
+          appName: 'Defcomm',
+          handle: senderName,
+          type: 0,
+          duration: 30000,
+          textAccept: 'Accept',
+          textDecline: 'Decline',
+          missedCallNotification: const NotificationParams(
+            showNotification: true,
+            isShowCallback: true,
+            subtitle: 'Missed call',
+            callbackText: 'Call back',
+          ),
+          extra: {
+            'meetingId': meetingId,
+            'callerId': msgUserId,
+            'callerName': senderName,
+          },
+          android: const AndroidParams(
+            isCustomNotification: false,
+            isShowLogo: false,
+            isShowFullLockedScreen: true,
+            ringtonePath: 'system_ringtone_default',
+            backgroundColor: '#1B5E20',
+            actionColor: '#4CAF50',
+            textColor: '#FFFFFF',
+          ),
+          ios: const IOSParams(
+            iconName: 'CallKitLogo',
+            handleType: '',
+            supportsVideo: true,
+            maximumCallGroups: 2,
+            maximumCallsPerCallGroup: 1,
+            ringtonePath: 'system_ringtone_default',
+          ),
+        ));
+      } catch (e) {
+        print('❌ background_pusher CallKit error: $e');
+      }
       return;
     }
 
@@ -407,10 +489,17 @@ void _handleBackgroundMessage(
       if (kind == 'group') body = "$senderName: ******";
 
       _lastEvent = "8. Showing Notif";
-
-     
+      
+      print("\n💬 Preparing to show notification:");
+      print("   App in foreground: $_isAppInForeground");
+      print("   Thread User: $threadUserName");
+      print("   Thread ID: $threadUserId");
+      print("   Kind: $kind");
 
       if(!_isAppInForeground) {
+         print("✅ App is in background - showing notification");
+         // Wake the screen so the notification heads-up is visible.
+         _serviceInstance?.invoke("wakeScreen");
 
          const AndroidNotificationDetails androidDetails =
           AndroidNotificationDetails(
@@ -419,6 +508,11 @@ void _handleBackgroundMessage(
             importance: Importance.max,
             priority: Priority.high,
             showWhen: true,
+            fullScreenIntent: true,
+            visibility: NotificationVisibility.public,
+            enableVibration: true,
+            playSound: true,
+            ticker: 'New message',
           );
       const NotificationDetails platformDetails = NotificationDetails(
         android: androidDetails,
@@ -436,17 +530,23 @@ void _handleBackgroundMessage(
       );
 
       _lastEvent = "Notif Shown";
+      print("✅ Notification displayed successfully");
       } else {
         _lastEvent = "App in Foreground, Notif Skipped";
+        print("⏭️ Skipping notification - app is in foreground");
       }
 
-      
-
       _lastEvent = "9. SUCCESS";
+      print("🏁 Message handling completed successfully\n");
     } else {
       _lastEvent = "Ignored State: $stateStr";
+      print("⏭️ Ignoring - unhandled state: $stateStr\n");
     }
-  } catch (e) {
+  } catch (e, stack) {
     _lastEvent = "Err at $_lastEvent: $e";
+    print("❌ ERROR in background message handler:");
+    print("   Last event: $_lastEvent");
+    print("   Error: $e");
+    print("   Stack: $stack");
   }
 }

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1039876586240",
+    "project_id": "defcommand-645e0",
+    "storage_bucket": "defcommand-645e0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1039876586240:android:e865357270e06ee3b051e5",
+        "android_client_info": {
+          "package_name": "come.deffcom.chatapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDysDvOowX1rTGP7_aYRWi1RMH5YZjjaDg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

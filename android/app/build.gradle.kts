@@ -3,10 +3,11 @@ plugins {
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+    id("com.google.gms.google-services")
 }
 
 android {
-    namespace = "com.example.defcomm"
+    namespace = "come.deffcom.chatapp"
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
@@ -25,7 +26,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID
-        applicationId = "com.example.defcomm"
+        applicationId = "come.deffcom.chatapp"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

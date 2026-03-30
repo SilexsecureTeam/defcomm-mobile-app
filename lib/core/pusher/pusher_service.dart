@@ -13,6 +13,7 @@ import 'package:defcomm/features/calling/presentation/bloc/call_cubit.dart';
 import 'package:defcomm/features/calling/presentation/bloc/call_event.dart';
 import 'package:defcomm/features/calling/presentation/pages/secure_calling.dart';
 import 'package:defcomm/features/chat_details/domain/entities/chat_message.dart';
+import 'package:get_storage/get_storage.dart';
 import 'package:defcomm/features/chat_details/domain/usecases/send_message.dart';
 import 'package:defcomm/features/chat_details/presentation/bloc/chat_detail_bloc.dart';
 import 'package:defcomm/features/chat_details/presentation/bloc/chat_detail_event.dart';
@@ -79,6 +80,7 @@ class PusherService {
   String? _activeChatId; // the currently open chat user id (nullable)
 
   final Set<String> _subscribedGroups = {};
+  bool _userChannelBound = false;
 
   // Monitor connectivity
   StreamSubscription? _connectivitySubscription;
@@ -87,6 +89,16 @@ class PusherService {
 
   // 2. Expose Stream Getter
   Stream<TypingStatus> get typingStream => _typingController.stream;
+
+  /// Broadcast stream that emits every incoming private (non-group) chat message
+  /// together with the sender's encrypted ID. ChatScreen subscribes to this to
+  /// receive live updates without re\
+  ying on the isThisChatOpen ID-match logic.
+  final StreamController<({String senderId, ChatMessage message})>
+      _incomingMsgController =
+      StreamController<({String senderId, ChatMessage message})>.broadcast();
+  Stream<({String senderId, ChatMessage message})> get incomingPrivateMessages =>
+      _incomingMsgController.stream;
 
   /// Call this from ChatScreen when opening/closing a chat
   void setActiveChat(String? chatUserId) {
@@ -144,19 +156,11 @@ class PusherService {
       'PusherService.init: usingCustomHost=$usingCustomHost, appKey=$appKey, host=$host, cluster=$cluster',
     );
 
-    // connect explicitly (this will use the auth provided above)
-    try {
-      _pusher!.connect();
-    } catch (e, st) {
-      debugPrint('Pusher connect error: $e\n$st');
-    }
-
     // Optional: listen to connection changes (debugging)
     try {
       _pusher!.onConnectionStateChange((state) {
         _lastConnectionState = state?.currentState ?? 'UNKNOWN';
         debugPrint('Pusher connection state changed: $_lastConnectionState');
-        debugPrint('Pusher connection state changed: ${state!.currentState}');
       });
       _pusher!.onConnectionError((err) {
         debugPrint(
@@ -167,10 +171,13 @@ class PusherService {
       // Not all versions expose these callbacks in exactly the same names; ignore if absent.
     }
 
+    // Connect to Pusher
     try {
       await _pusher!.connect();
-    } catch (e) {
-      debugPrint("Pusher connect error: $e");
+      debugPrint('✅ Pusher connection initiated');
+    } catch (e, stack) {
+      debugPrint("❌ Pusher connect error: $e");
+      debugPrint("Stack: $stack");
     }
 
     await _resyncAllSubscriptions();
@@ -214,8 +221,7 @@ class PusherService {
   void reconnect() {
     debugPrint("🔄 PusherService: Attempting to reconnect...");
 
-    // 1. Show User Feedback
-    Fluttertoast.showToast(msg: "Reconnecting...", textColor: Colors.white);
+    // 1. (Reconnecting toast removed — silent reconnect)
 
     // 2. If client doesn't exist, initialize it (which handles connect)
     if (_pusher == null) {
@@ -239,36 +245,48 @@ class PusherService {
   void subscribeToUserChannel(String userId) {
     if (_pusher == null) init();
 
-    try {
-      // Use normal subscribe(); auth was already set on the options
-      _channel = _pusher!.subscribe('private-chat.$userId');
-
-      // Bind to the event you need
-      _channel?.bind('private.message.sent', (PusherEvent? e) {
-        debugPrint('PUSHER RAW EVENT (private.message.sent): ${e?.data}');
-        if (e?.data == null) return;
-        _handlePrivateMessageSent(e!.data!);
-      });
-
-      // Most important: bind subscription_error to see auth/server failures
-      _channel?.bind('pusher:subscription_error', (PusherEvent? e) {
-        debugPrint('Pusher subscription_error: ${e?.data}');
-        // e?.data often contains server response explaining why auth failed
-      });
-
-      // Also bind generic pusher:subscription_succeeded to know success (helpful for debug)
-      _channel?.bind('pusher:subscription_succeeded', (PusherEvent? e) {
-        debugPrint(
-          'Pusher subscription_succeeded for private-chat.$userId: ${e?.data}',
-        );
-      });
-
-      debugPrint(
-        'PusherService.subscribeToUserChannel: attempted subscribe to private-chat.$userId',
-      );
-    } catch (e, st) {
-      debugPrint('PusherService.subscribeToUserChannel error: $e\n$st');
+    // Prevent duplicate binds on every resume
+    if (_userChannelBound) {
+      debugPrint('PusherService.subscribeToUserChannel: already bound, skipping');
+      return;
     }
+
+    Channel? ch;
+    try {
+      ch = _pusher!.subscribe('private-chat.$userId');
+    } catch (e) {
+      final msg = e.toString();
+      if (msg.contains('Already subscribed') || msg.contains('SUBSCRIBE_ERROR')) {
+        debugPrint('PusherService.subscribeToUserChannel: already subscribed at native level, skipping');
+        _userChannelBound = true;
+        return;
+      }
+      debugPrint('PusherService.subscribeToUserChannel error: $e');
+      return;
+    }
+
+    _channel = ch;
+
+    _channel?.bind('private.message.sent', (PusherEvent? e) {
+      debugPrint('PUSHER RAW EVENT (private.message.sent): ${e?.data}');
+      if (e?.data == null) return;
+      _handlePrivateMessageSent(e!.data!);
+    });
+
+    _channel?.bind('pusher:subscription_error', (PusherEvent? e) {
+      debugPrint('Pusher subscription_error: ${e?.data}');
+    });
+
+    _channel?.bind('pusher:subscription_succeeded', (PusherEvent? e) {
+      debugPrint(
+        'Pusher subscription_succeeded for private-chat.$userId: ${e?.data}',
+      );
+    });
+
+    _userChannelBound = true;
+    debugPrint(
+      'PusherService.subscribeToUserChannel: attempted subscribe to private-chat.$userId',
+    );
   }
 
   //   //  Original pusher
@@ -295,38 +313,47 @@ class PusherService {
     // Often it is 'private-group.ID' or 'private-groups.ID'
     final String channelName = 'private-group.$groupIdEn';
 
+    // Prevent duplicate binds using the tracked set
+    if (_subscribedGroups.contains(groupIdEn)) {
+      debugPrint('Pusher: Already subscribed to $channelName, skipping');
+      return;
+    }
+    _subscribedGroups.add(groupIdEn);
+
+    Channel? grpCh;
     try {
       debugPrint('Pusher: Subscribing to Group Channel: $channelName');
-
-      if (_groupChannel != null && _groupChannel!.name == channelName) {
-        // Already subscribed
+      grpCh = _pusher!.subscribe(channelName);
+    } catch (e) {
+      final msg = e.toString();
+      if (msg.contains('Already subscribed') || msg.contains('SUBSCRIBE_ERROR')) {
+        debugPrint('Pusher: $channelName already subscribed at native level, skipping binds');
         return;
       }
-
-      _groupChannel = _pusher!.subscribe(channelName);
-
-      // 2. 🔴 CORRECT EVENT NAME (Matches React Line 124)
-      _groupChannel?.bind('group.message.sent', (PusherEvent? e) {
-        debugPrint('🎯 MATCHED group.message.sent: ${e?.data}');
-        if (e?.data != null) {
-          // Parse JSON here because the handler expects a Map
-          final decoded = jsonDecode(e!.data!) as Map<String, dynamic>;
-          _handleGroupMessageReceived(decoded);
-        }
-      });
-
-      // Bind success/error for debugging
-      _groupChannel?.bind('pusher:subscription_error', (PusherEvent? e) {
-        debugPrint('❌ Pusher Group subscription_error: ${e?.data}');
-        // If this fires, your Flutter Token is invalid or User isn't in group "6949..."
-      });
-
-      _groupChannel?.bind('pusher:subscription_succeeded', (PusherEvent? e) {
-        debugPrint('✅ Pusher Group subscription_succeeded: $channelName');
-      });
-    } catch (e) {
       debugPrint('PusherService.subscribeToGroupChannel error: $e');
+      _subscribedGroups.remove(groupIdEn);
+      return;
     }
+
+    _groupChannel = grpCh;
+
+    _groupChannel?.bind('group.message.sent', (PusherEvent? e) {
+      debugPrint('🎯 MATCHED group.message.sent: ${e?.data}');
+      if (e?.data != null) {
+        // Parse JSON here because the handler expects a Map
+        final decoded = jsonDecode(e!.data!) as Map<String, dynamic>;
+        _handleGroupMessageReceived(decoded);
+      }
+    });
+
+    _groupChannel?.bind('pusher:subscription_error', (PusherEvent? e) {
+      debugPrint('❌ Pusher Group subscription_error: ${e?.data}');
+      // If this fires, your Flutter Token is invalid or User isn't in group "6949..."
+    });
+
+    _groupChannel?.bind('pusher:subscription_succeeded', (PusherEvent? e) {
+      debugPrint('✅ Pusher Group subscription_succeeded: $channelName');
+    });
   }
 
   /// Unsubscribe when leaving the screen
@@ -643,8 +670,54 @@ if (stateStr == 'last_message') {
 
     // }
 
+    // ── State-agnostic call control ─────────────────────────────────────────
+    // The backend may broadcast call messages with state='call', 'callUpdate',
+    // OR 'text'. Detect purely by message content so we never miss a call.
+    {
+      final String ctrlMsg =
+          (baseMap['message'] ?? baseMap['body'] ?? '').toString();
+
+      if (ctrlMsg.startsWith(kCallControlInvitePrefix) && !isMyChat) {
+        final parts = ctrlMsg.split('|');
+        if (parts.length >= 2) {
+          final callerName =
+              (senderObj is Map ? (senderObj['name'] ?? 'Unknown') : 'Unknown')
+                  .toString();
+          final meetingId = parts[1];
+          debugPrint(
+            '📞 [Foreground Pusher] Incoming call from $callerName, meetingId=$meetingId',
+          );
+          // Show CallKit UI — CallLifecycleManager handles navigation on accept.
+          try {
+            await CallKitService.showIncomingCall(
+              callerName: callerName,
+              callerId: senderId,
+              meetingId: meetingId,
+            );
+          } catch (e) {
+            debugPrint('❌ [Call] CallKitService.showIncomingCall failed: $e');
+          }
+        }
+        return;
+      }
+
+      if (ctrlMsg == kCallControlRejected || ctrlMsg == kCallControlEnded) {
+        await CallKitService.endAllCalls();
+        try {
+          FlutterRingtonePlayer().stop();
+          serviceLocator<CallBloc>().add(const CallEnded());
+          navigatorKey.currentState?.popUntil(
+            (route) => route.settings.name != 'secure_call',
+          );
+        } catch (_) {}
+        return;
+      }
+
+      if (ctrlMsg == kCallControlAccepted) return;
+    }
+
     // ============= 6. Text / Call Updates =============
-    if (stateStr == 'text' || stateStr == 'callUpdate') {
+    if (stateStr == 'text' || stateStr == 'callUpdate' || stateStr == 'call') {
       // ---------------------------------------------------------
       // 🔍 ROBUST ID EXTRACTION (Fixes the "Null" Crash)
       // ---------------------------------------------------------
@@ -682,40 +755,37 @@ if (stateStr == 'last_message') {
                   .toString();
 
           if (!isMyChat) {
-            // try {
-            //   FlutterRingtonePlayer().playRingtone(looping: true);
-            // } catch (_) {}
-
-            await CallKitService.showIncomingCall(
-              callerName: callerName,
-              callerId: senderId,
-              meetingId: meetingId,
-              avatarUrl: null, // Add avatar URL if you have it in senderObj
-            );
-
-            // bool isCallScreenVisible = false;
-            // navigatorKey.currentState?.popUntil((route) {
-            //   if (route.settings.name == 'secure_call')
-            //     isCallScreenVisible = true;
-            //   return true;
-            // });
-
-            // if (isCallScreenVisible) return;
-
-            // navigatorKey.currentState?.push(
-            //   MaterialPageRoute(
-            //     settings: const RouteSettings(name: 'secure_call'),
-            //     builder: (_) => BlocProvider.value(
-            //       value: serviceLocator<CallBloc>(),
-            //       child: SecureCallingScreen(
-            //         isCaller: false,
-            //         meetingId: meetingId,
-            //         otherUserName: callerName,
-            //         peerIdEn: senderId,
-            //       ),
-            //     ),
-            //   ),
-            // );
+            // Increment missed-call badge (reset when user visits calls tab)
+            final _gs = GetStorage();
+            _gs.write('missed_calls_badge',
+                (_gs.read<int>('missed_calls_badge') ?? 0) + 1);
+            try { FlutterRingtonePlayer().playRingtone(looping: true); } catch (_) {}
+            bool isCallScreenVisible = false;
+            navigatorKey.currentState?.popUntil((route) {
+              if (route.settings.name == 'secure_call') isCallScreenVisible = true;
+              return true;
+            });
+            if (!isCallScreenVisible) {
+              try {
+                navigatorKey.currentState?.push(
+                  MaterialPageRoute(
+                    settings: const RouteSettings(name: 'secure_call'),
+                    builder: (_) => BlocProvider.value(
+                      value: serviceLocator<CallBloc>(),
+                      child: SecureCallingScreen(
+                        isCaller: false,
+                        meetingId: meetingId,
+                        otherUserName: callerName,
+                        peerIdEn: senderId,
+                        shouldAutoJoin: false,
+                      ),
+                    ),
+                  ),
+                );
+              } catch (e) {
+                debugPrint('❌ [Call] Navigator push failed: $e');
+              }
+            }
           }
         }
         return; // Control message, don't show in chat
@@ -738,6 +808,10 @@ if (stateStr == 'last_message') {
 
       if (msgText == kCallControlAccepted) return;
 
+      // callUpdate messages are purely call-state signals (ringing, busy, etc.).
+      // They must never reach the chat thread or increment the unread counter.
+      if (stateStr == 'callUpdate') return;
+
       // ---------------------------------------------------------
       // 💬 CHAT MESSAGE HANDLING
       // ---------------------------------------------------------
@@ -749,15 +823,24 @@ if (stateStr == 'last_message') {
       final String userToEn = (baseMap['user_to'] ?? receiverId).toString();
 
       // 2. Determine "Conversation ID" (Navigation Key)
+      // For incoming messages use senderId (senderObj['id']) — this is the
+      // same encrypted ID stored in the thread list and set as _activeChatId.
+      // msgUserId comes from baseMap['user_id'] which can be a plain int and
+      // will NOT match the encrypted _activeChatId.
       String chatIdForNav;
       if (chatUserType == 'group' && groupTo.isNotEmpty) {
         chatIdForNav = groupTo;
       } else {
-        chatIdForNav = isMyMsg ? userToEn : msgUserId;
+        chatIdForNav = isMyMsg ? userToEn : senderId;
       }
 
-      final bool isThisChatOpen =
-          _activeChatId != null && _activeChatId == chatIdForNav;
+      // Broaden the match: try every plausible ID so the check never misses
+      // even when different fields carry the ID in different formats.
+      final bool isThisChatOpen = _activeChatId != null &&
+          (_activeChatId == chatIdForNav ||
+              _activeChatId == senderId ||
+              _activeChatId == msgUserId ||
+              (!isMyMsg && _activeChatId == userToEn));
 
       // 3. Build ChatMessage Object
       // Use fallback map if data is missing to prevent crashes
@@ -765,6 +848,15 @@ if (stateStr == 'last_message') {
         baseMap['sender_id'] = msgUserId;
       }
       final chatMessage = ChatMessage.fromMap(baseMap, currentUserId: myId);
+
+      // Broadcast to any active ChatScreen subscriber (reliable alternative to
+      // isThisChatOpen ID matching which can silently fail on ID format mismatches)
+      if (chatUserType != 'group' && !_incomingMsgController.isClosed) {
+        _incomingMsgController.add((
+          senderId: senderId.isNotEmpty ? senderId : msgUserId,
+          message: chatMessage,
+        ));
+      }
 
       // 4. Update Active Chat Screen
       if (isThisChatOpen) {
@@ -824,7 +916,8 @@ if (stateStr == 'last_message') {
       // );
 
        final bool shouldReset = isMyMsg || isThisChatOpen;
-      final bool shouldIncrement = !isMyMsg && !isThisChatOpen;
+      // stateStr=='call' are call-log records, not chat messages — don't bump unread
+      final bool shouldIncrement = !isMyMsg && !isThisChatOpen && stateStr != 'call';
 
       messagingBloc.add(
         NewThreadCreatedEvent(
@@ -888,6 +981,9 @@ if (stateStr == 'last_message') {
       }
       _pusher?.disconnect();
       _pusher = null;
+      // Reset subscription tracking so reconnect can re-subscribe cleanly
+      _subscribedGroups.clear();
+      _userChannelBound = false;
     } catch (e) {
       debugPrint('Pusher disconnect error: $e');
     }

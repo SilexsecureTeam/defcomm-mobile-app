@@ -69,11 +69,9 @@ class CallEnded extends CallEvent {
   const CallEnded();
 }
 
-// class RemoteParticipantJoined extends CallEvent {
-//   const RemoteParticipantJoined();
+class RemoteParticipantJoined extends CallEvent {
+  const RemoteParticipantJoined();
 
-//   @override
-//   List<Object?> get props => [];
-// }
-
-
+  @override
+  List<Object?> get props => [];
+}

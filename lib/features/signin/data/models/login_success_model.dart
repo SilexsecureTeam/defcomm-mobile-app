@@ -16,7 +16,7 @@ class LoginSuccessModel extends LoginSuccess {
       accessToken: data['access_token'] as String,
       userEnid: data['user_enid'] as String,
       user: UserModel.fromJson(data['user'] as Map<String, dynamic>),
-      deviceId: data['device_id'] as String,
+      deviceId: (data['device_id'] ?? '') as String,
     );
   }
 }

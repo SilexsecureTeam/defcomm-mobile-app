@@ -1,5 +1,6 @@
 import 'package:defcomm/features/chat_details/domain/entities/chat_message.dart';
 import 'package:defcomm/features/chat_details/domain/usecases/fetch_local_message.dart';
+import 'package:get_storage/get_storage.dart';
 import 'package:defcomm/features/chat_details/domain/usecases/fetch_messages.dart';
 import 'package:defcomm/features/chat_details/domain/usecases/send_message.dart';
 import 'package:defcomm/features/chat_details/presentation/bloc/chat_detail_event.dart';
@@ -121,8 +122,7 @@ class ChatDetailBloc extends Bloc<ChatDetailEvent, ChatDetailState> {
             List<ChatMessage> finalMessages;
             
             if (_currentPage - 1 == 1) {
-                // If this was the first page result from server, it overrides local cache 
-                // to ensure sync (e.g. read status updates, deleted messages).
+                // Page-1 from server is the authoritative list.
                 finalMessages = chatPage.messages;
             } else {
                 // It's page 2+, just append
@@ -153,7 +153,7 @@ class ChatDetailBloc extends Bloc<ChatDetailEvent, ChatDetailState> {
       final currentState = state;
       if (currentState is! ChatDetailLoaded) return;
 
-      const myUserId = 'my_user_id'; 
+      final String myUserId = GetStorage().read('userEnId') ?? 'me';
 
       final optimisticMessage = ChatMessage(
         id: DateTime.now().millisecondsSinceEpoch.toString(),

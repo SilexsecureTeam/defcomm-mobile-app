@@ -80,17 +80,25 @@ class _CallLifecycleManagerState extends State<CallLifecycleManager> {
   void _navigateToCallScreen(
     String meetingId,
     String callerId,
-    String callerName,
-  ) {
+    String callerName, {
+    int attempt = 0,
+  }) {
     debugPrint(
-      "🚀 CallLifecycleManager: Navigating to Call Screen: $meetingId",
+      "🚀 CallLifecycleManager: Navigating to Call Screen: $meetingId (attempt $attempt)",
     );
-
 
     final nav = navigatorKey.currentState;
 
     if (nav == null) {
-      debugPrint("❌ Navigator is null, cannot navigate!");
+      if (attempt < 8) {
+        // Navigator not ready yet (app coming from lock screen) — retry.
+        Future.delayed(const Duration(milliseconds: 300), () {
+          _navigateToCallScreen(meetingId, callerId, callerName,
+              attempt: attempt + 1);
+        });
+      } else {
+        debugPrint("❌ Navigator still null after retries, giving up.");
+      }
       return;
     }
 
@@ -114,8 +122,7 @@ class _CallLifecycleManagerState extends State<CallLifecycleManager> {
             meetingId: meetingId,
             otherUserName: callerName,
             peerIdEn: callerId,
-            shouldAutoJoin:
-                true, 
+            shouldAutoJoin: true,
           ),
         ),
       ),

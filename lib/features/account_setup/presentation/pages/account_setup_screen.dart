@@ -16,6 +16,7 @@ class AccountSetupScreen extends StatefulWidget {
 
 class _AccountSetupScreenState extends State<AccountSetupScreen> {
   double _progress = 0.0;
+  bool _navigationScheduled = false;
 
   @override
   void initState() {
@@ -25,23 +26,26 @@ class _AccountSetupScreenState extends State<AccountSetupScreen> {
 
   void _startSetupProcess() {
     Timer.periodic(const Duration(milliseconds: 25), (timer) {
-      if (mounted) {
-        setState(() {
-          _progress += 0.01;
-          if (_progress >= 1.0) {
-            timer.cancel();
-            _progress = 1.0;
-            Future.delayed(const Duration(seconds: 2), () {
-              FocusScope.of(context).unfocus();
-                              Navigator.of(context).pushReplacement(
-                                MaterialPageRoute(
-                                  builder: (BuildContext context) =>
-                                      const HomeNavr(),
-                                ),
-                              );
-              print("Setup complete! Navigating to home...");
-            });
-          }
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        _progress += 0.01;
+        if (_progress >= 1.0) _progress = 1.0;
+      });
+      if (_progress >= 1.0 && !_navigationScheduled) {
+        _navigationScheduled = true;
+        timer.cancel();
+        Future.delayed(const Duration(seconds: 2), () {
+          if (!mounted) return;
+          FocusScope.of(context).unfocus();
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(
+              builder: (BuildContext context) => const HomeNavr(),
+            ),
+          );
+          print("Setup complete! Navigating to home...");
         });
       }
     });
@@ -49,7 +53,6 @@ class _AccountSetupScreenState extends State<AccountSetupScreen> {
 
   @override
   Widget build(BuildContext context) {
-
 
 
     final screenWidth = MediaQuery.of(context).size.width;

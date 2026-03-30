@@ -62,6 +62,7 @@ class _SecureCallingScreenState extends State<SecureCallingScreen> {
   bool _hasCallStarted = false;
 
   bool _isAutoJoining = false;
+  bool _isDialingTonePlaying = false;
 
   @override
   void initState() {
@@ -85,14 +86,24 @@ class _SecureCallingScreenState extends State<SecureCallingScreen> {
     //   ),
     // );
   
+    // ── Defensive reset: the CallBloc is a singleton and may retain
+    // stale state from a previous call that wasn't cleaned up. ──
+    final bloc = context.read<CallBloc>();
+    if (bloc.state is! CallInitial) {
+      debugPrint('⚠️ CallBloc was in stale state ${bloc.state}, resetting…');
+      bloc.add(const CallEnded());
+      // Give the bloc one frame to process the reset before continuing
+      // Note: initState cannot be async, so we can't await here directly.
+      // The reset will happen, but the subsequent call logic might run
+      // before the bloc fully transitions to CallInitial.
+      // For this specific case, it's generally safe as the next event
+      // (StartCallRequested) will override any intermediate state.
+    }
 
     if (widget.isCaller) {
       context.read<CallBloc>().add(
         StartCallRequested(
-          // for deterministic setup, this should NOT be null;
-          // pass the same meetingId you built with buildSingleCallRoomId
-          meetingId: null,
-          // widget.meetingId,
+          meetingId: widget.meetingId,
           displayName: myDisplayName,
           micEnabled: true,
           camEnabled: true,
@@ -144,16 +155,14 @@ class _SecureCallingScreenState extends State<SecureCallingScreen> {
       debugPrint('Error leaving room in dispose: $e');
     }
 
+    // ── Safety net: always reset the singleton CallBloc so the next
+    // call screen starts clean. ──
     try {
-      final callback = _onParticipantJoinedCallback;
-      if (callback != null && _connectedRoom != null) {
-        _connectedRoom!.off(Events.participantJoined, callback);
-      }
-      _onParticipantJoinedCallback = null;
-      _connectedRoom = null;
+      serviceLocator<CallBloc>().add(const CallEnded());
     } catch (e) {
-      debugPrint('Error cleaning participant listener in dispose: $e');
+      debugPrint('Error resetting CallBloc in dispose: $e');
     }
+
     super.dispose();
   }
 
@@ -187,9 +196,10 @@ class _SecureCallingScreenState extends State<SecureCallingScreen> {
         SendMessageParams(
           message: controlText,
           isFile: false,
-          chatUserType: 'user', // for now 1–1 user calls
-          currentChatUser: widget.peerIdEn, // encrypted id of the other user
-          chatId: null, // let backend attach chat_id if needed
+          chatUserType: 'user',
+          currentChatUser: widget.peerIdEn,
+          chatId: null,
+          mssType: 'call',
         ),
       );
       debugPrint("control txt: ${controlText}");
@@ -210,121 +220,84 @@ class _SecureCallingScreenState extends State<SecureCallingScreen> {
             padding: const EdgeInsets.all(24.0),
             child: BlocConsumer<CallBloc, CallState>(
               listener: (context, state) async {
-              
-
-                if (state is CallConnecting || state is CallConnected) {
-                    if (_isAutoJoining) {
-                  setState(() {
-                    _isAutoJoining = false;
-                  });
-                }
+                // ── Mark call as started for any active state ──
+                if (state is CallConnecting ||
+                    state is CallRoomJoined ||
+                    state is CallConnected) {
+                  if (_isAutoJoining) {
+                    setState(() {
+                      _isAutoJoining = false;
+                    });
+                  }
                   _hasCallStarted = true;
                 }
 
+                // ── Remote end hung up → close this screen ──
                 if (state is CallInitial && _hasCallStarted) {
                   if (mounted) {
                     debugPrint("Call ended remotely, closing screen.");
                     Navigator.of(context).maybePop();
                   }
-                  return; // Stop processing, we are leaving.
+                  return;
                 }
 
+                // ── Room joined (local) — send invite & play dial tone ──
+                if (state is CallRoomJoined) {
+                  final room = state.room;
+                  _connectedRoom = room;
+
+                  // Caller: play dialing tone while waiting for callee
+                  // Caller: play dialing tone while waiting for callee
+                  if (widget.isCaller && !_isDialingTonePlaying) {
+                    _isDialingTonePlaying = true;
+                    debugPrint("Started Dialing Tone...");
+                    FlutterRingtonePlayer().play(
+                      fromAsset: "audio/phone-calling-tone.mp3",
+                      ios: IosSounds.glass,
+                      looping: true,
+                      volume: 0.7,
+                    );
+                  }
+
+                  // Invite was already sent by chat_screen/recent_calls_screen
+                  // before navigating here, so we only need to track it.
+                  _inviteSent = true;
+                }
+
+                // ── Remote participant joined → call is live ──
                 if (state is CallConnected) {
                   final room = state.room;
-                  _connectedRoom = room; // save room for cleanup later
+                  _connectedRoom = room;
 
-                  // ---- fast check: see if someone else already present ----
-                  try {
-                    int participantCount = 1;
-                    final dynamic participantsObj =
-                        room.participants; // defensive
-
-                    if (participantsObj is Map) {
-                      participantCount = participantsObj.length;
-                    } else if (participantsObj is List) {
-                      participantCount = participantsObj.length;
-                    }
-
-                    if (widget.isCaller && participantCount <= 1) {
-                      debugPrint("Started Dialing Tone...");
-
-                      // Option A: Use the default ringtone (easiest, but might be loud)
-                      // FlutterRingtonePlayer().playRingtone(looping: true);
-
-                      // Option B: (Better) Use a specific "dialing" asset file if you have one
-                      FlutterRingtonePlayer().play(
-                        fromAsset: "audio/phone-calling-tone.mp3",
-                        ios: IosSounds.glass,
-                        looping: true,
-                        volume: 0.7, // keep volume lower for ear
-                      );
-                    }
-
-                    if (participantCount > 1 && !_remoteJoined) {
-                      _remoteJoined = true;
-                      _startDurationTimer();
-                    }
-                  } catch (e) {
-                    debugPrint('participants inspection failed: $e');
+                  // Stop dialing / ringing tone
+                  if (_isDialingTonePlaying) {
+                    _isDialingTonePlaying = false;
+                    FlutterRingtonePlayer().stop();
+                    debugPrint("Peer joined, stopped dialing tone.");
                   }
 
-                  // ---- attach participantJoined listener (store as Function) ----
-                  try {
-                    // Create a Function (non-nullable) and store it
-                    _onParticipantJoinedCallback = (dynamic participant) {
-                      FlutterRingtonePlayer().stop();
-                      debugPrint("Peer joined, stopped dialing tone.");
-                      if (!_remoteJoined) {
-                        _remoteJoined = true;
-                        if (mounted) setState(() {});
-                        _startDurationTimer();
-                      }
-                    };
-
-                    // Attach it to the room (VideoSDK API: room.on(event, callback))
-                    room.on(
-                      Events.participantJoined,
-                      _onParticipantJoinedCallback!,
-                    );
-                  } catch (e) {
-                    debugPrint(
-                      'Could not attach participantJoined listener: $e',
-                    );
-                    // fallback behavior could go here if desired
+                  if (!_remoteJoined) {
+                    _remoteJoined = true;
+                    _startDurationTimer();
                   }
+                }
 
-                  // Caller sends invite once after entry
-                  if (widget.isCaller && !_inviteSent) {
-                    _inviteSent = true;
-                    final roomId = state.room.id;
-                    final controlText = '$kCallControlInvitePrefix$roomId';
-                    await _sendCallControlMessage(controlText);
-                    debugPrint(
-                      'Sent call invite control message: $controlText',
-                    );
+                // ── Error ──
+                if (state is CallError) {
+                  if (_isDialingTonePlaying) {
+                    _isDialingTonePlaying = false;
+                    FlutterRingtonePlayer().stop();
                   }
-                } else if (state is CallError) {
-                  // stop timer and reset flags
-                  FlutterRingtonePlayer().stop();
                   _stopDurationTimer();
                   _remoteJoined = false;
-
-                  // remove the attached listener if any (use stored _connectedRoom)
-                  try {
-                    final callback = _onParticipantJoinedCallback;
-                    if (callback != null && _connectedRoom != null) {
-                      _connectedRoom!.off(Events.participantJoined, callback);
-                    }
-                    _onParticipantJoinedCallback = null;
-                    _connectedRoom = null;
-                  } catch (e) {
-                    debugPrint('Error removing participantJoined listener: $e');
-                  }
+                  _connectedRoom = null;
                 }
               },
               builder: (context, state) {
                 final bool isConnecting =
-                    (state is CallConnecting) || _isAutoJoining;
+                    (state is CallConnecting) ||
+                    (state is CallRoomJoined) ||
+                    _isAutoJoining;
                 final bool isConnected = state is CallConnected;
                 final String timerText = isConnected
                     ? _formatDuration(_elapsedSeconds)
@@ -761,7 +734,7 @@ class _SecureCallingScreenState extends State<SecureCallingScreen> {
     bool isCaller,
     Future<void> Function(String) sendControlText,
   ) {
-    final bool isConnecting = state is CallConnecting;
+    final bool isConnecting = state is CallConnecting || state is CallRoomJoined;
     final bool isConnected = state is CallConnected;
 
     // 1) BEFORE accepting: initial incoming call
@@ -1014,30 +987,22 @@ class _SecureCallingScreenState extends State<SecureCallingScreen> {
   // }
 
   void _endLocalCallAndNotifyPeer(BuildContext context) async {
-    try {
-      // 1. Send control message so the remote side will close too
-      await _sendCallControlMessage(kCallControlEnded);
+    // 1. Close locally FIRST — never block on the network call.
+    FlutterRingtonePlayer().stop();
+    _stopDurationTimer();
 
-      // 2. Notify the Bloc via CONTEXT (Not ServiceLocator)
-      // We use context.read because we need the specific instance
-      // attached to this widget tree that holds the active _room.
-      if (mounted) {
-        context.read<CallBloc>().add(const CallEnded());
-      }
-
-      // 3. Release global lock
-      serviceLocator<CallManager>().endCall();
-
-      // 4. Stop Ringtone and Timers
-      FlutterRingtonePlayer().stop();
-      _stopDurationTimer();
-
-      // 5. Close the UI
-      // if (mounted) {
-      //   Navigator.of(context).maybePop();
-      // }
-    } catch (e) {
-      debugPrint('Error ending call locally: $e');
+    if (mounted) {
+      context.read<CallBloc>().add(const CallEnded());
+      Navigator.of(context).maybePop();
     }
+
+    try {
+      serviceLocator<CallManager>().endCall();
+    } catch (_) {}
+
+    // 2. Fire-and-forget the control message so the remote side also closes.
+    _sendCallControlMessage(kCallControlEnded).catchError((e) {
+      debugPrint('Failed to send end-call signal: $e');
+    });
   }
 }

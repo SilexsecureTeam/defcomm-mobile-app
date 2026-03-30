@@ -9,6 +9,8 @@ import 'package:defcomm/core/theme/app_colors.dart';
 import 'package:defcomm/core/utils/call_manager.dart';
 import 'package:defcomm/core/utils/call_utils.dart';
 import 'package:defcomm/core/utils/format_call_time_stamp.dart';
+import 'package:defcomm/features/calling/call_control_constants.dart';
+import 'package:defcomm/features/calling/domain/repositories/call_repository.dart';
 import 'package:defcomm/features/calling/presentation/bloc/call_bloc.dart';
 import 'package:defcomm/features/calling/presentation/pages/secure_calling.dart';
 import 'package:defcomm/features/chat_details/domain/usecases/send_message.dart';
@@ -55,9 +57,10 @@ class _RecentCallsScreenState extends State<RecentCallsScreen> {
 
      @override
   void dispose() {
-    // 4. Cleanup
     _connectivitySubscription?.cancel();
-    _callsCubit.close(); 
+    // Do NOT close _callsCubit — it is a lazy singleton managed by the
+    // service locator. Calling close() permanently kills it and makes
+    // recent calls blank on every subsequent tab visit.
     super.dispose();
   }
 
@@ -88,11 +91,15 @@ class _RecentCallsScreenState extends State<RecentCallsScreen> {
     final otherIdEn = userId; //widget.user.id;
 
     final sendMessageUseCase = serviceLocator<SendMessage>();
+    final callRepo = serviceLocator<CallRepository>();
 
     try {
+      final String roomId = await callRepo.createMeetingId();
+      debugPrint("✅ VideoSDK Room Ready (Recent Calls): $roomId");
+
       await sendMessageUseCase(
         SendMessageParams(
-          message: 'voice_call',
+          message: '$kCallControlInvitePrefix$roomId',
           isFile: false,
           chatUserType: 'user',
           currentChatUser: otherIdEn,
@@ -100,39 +107,31 @@ class _RecentCallsScreenState extends State<RecentCallsScreen> {
           mssType: 'call',
         ),
       );
+
+      Navigator.of(context)
+          .push(
+            MaterialPageRoute(
+              settings: const RouteSettings(name: 'secure_call'),
+              builder: (_) => BlocProvider.value(
+                value: serviceLocator<CallBloc>(),
+                child: SecureCallingScreen(
+                  isCaller: true,
+                  meetingId: roomId,
+                  otherUserName: otherUserName,
+                  peerIdEn: peerIdEn, //widget.user.id,
+                ),
+              ),
+            ),
+          )
+          .then((_) {
+            releaseLockIfNeeded();
+          });
+
     } catch (e) {
       debugPrint('Error sending call signal: $e');
       releaseLockIfNeeded();
       return;
     }
-
-
-    Navigator.of(context)
-        .push(
-          MaterialPageRoute(
-            settings: const RouteSettings(name: 'secure_call'),
-            builder: (_) => BlocProvider.value(
-              value: serviceLocator<CallBloc>(),
-              child: SecureCallingScreen(
-                isCaller: true,
-                meetingId: null,
-                otherUserName: otherUserName,
-                peerIdEn: peerIdEn, //widget.user.id,
-              ),
-            ),
-          ),
-        )
-        .then((_) {
-          releaseLockIfNeeded();
-        });
-
-
-    
-    
-
-
-
-    
   }
 
   @override
@@ -158,7 +157,7 @@ class _RecentCallsScreenState extends State<RecentCallsScreen> {
             ),
             SafeArea(
               child: Padding(
-                padding: const EdgeInsets.only(left: 16.0, right: 16),
+                padding: const EdgeInsets.only(top: 36, left: 16.0, right: 16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -226,42 +225,82 @@ class _RecentCallsScreenState extends State<RecentCallsScreen> {
                                         ? call.sendUserName
                                         : call.sendUserPhone);
 
+                              final bool isMissed = () {
+                                final s = call.callState.toLowerCase();
+                                return s.contains('miss') ||
+                                    s.contains('reject') ||
+                                    s.contains('no_answer') ||
+                                    s.contains('declined');
+                              }();
+                              final Color nameColor = (!isSenderCurrent && isMissed)
+                                  ? const Color(0xFFE53935)
+                                  : Colors.white;
+
                               return InkWell(
                                 onTap: () {
-                                  _onCallPressed(
-                                    call.receiveUserId,
-                                    displayName,
-                                    call.sendUserId,
-                                  );
+                                  final remoteId = isSenderCurrent
+                                      ? call.receiveUserId
+                                      : call.sendUserId;
+                                  if (remoteId != null &&
+                                      remoteId.isNotEmpty) {
+                                    _onCallPressed(
+                                      remoteId,
+                                      displayName,
+                                      isSenderCurrent
+                                          ? call.receiveUserId
+                                          : call.sendUserId,
+                                    );
+                                  }
                                 },
-                                splashColor: Colors.white.withOpacity(0.06),
                                 borderRadius: BorderRadius.circular(12),
                                 child: Padding(
-                                  padding: const EdgeInsets.only(bottom: 20.0),
+                                  padding: const EdgeInsets.symmetric(
+                                      vertical: 10.0),
                                   child: Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.center,
                                     children: [
+                                      // Avatar
                                       CircleAvatar(
-                                        radius: 20,
+                                        radius: 22,
                                         backgroundImage: const AssetImage(
                                           "images/profile_img.png",
                                         ),
                                       ),
-                                      const SizedBox(width: 16),
+                                      const SizedBox(width: 14),
+
+                                      // Name + full date below
                                       Expanded(
-                                        child: Text(
-                                          displayName,
-                                          style: GoogleFonts.poppins(
-                                            color: Colors.white,
-                                            fontSize: 16,
-                                          ),
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Text(
+                                              displayName,
+                                              style: GoogleFonts.poppins(
+                                                color: nameColor,
+                                                fontSize: 15,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 3),
+                                            Text(
+                                              formatCallFullDate(
+                                                  call.createdAtUtc),
+                                              style: GoogleFonts.poppins(
+                                                color: Colors.white54,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                       ),
-                                      Text(
-                                        formatCallTimestamp(call.createdAtUtc),
-                                        style: GoogleFonts.poppins(
-                                          color: Colors.white70,
-                                          fontSize: 14,
-                                        ),
+
+                                      // Call type icon
+                                      _buildCallTypeIcon(
+                                        isSenderCurrent: isSenderCurrent,
+                                        callState: call.callState,
                                       ),
                                     ],
                                   ),
@@ -280,6 +319,23 @@ class _RecentCallsScreenState extends State<RecentCallsScreen> {
         ),
       ),
     );
+  }
+
+  Widget _buildCallTypeIcon({
+    required bool isSenderCurrent,
+    required String callState,
+  }) {
+    final String state = callState.toLowerCase();
+    final bool isMissed = state.contains('miss') ||
+        state.contains('reject') ||
+        state.contains('no_answer') ||
+        state.contains('declined');
+
+    final String asset = isSenderCurrent
+        ? 'images/outgoing_call.png'
+        : (isMissed ? 'images/missed_call.png' : 'images/incoming_call.png');
+
+    return Image.asset(asset, width: 16, height: 16);
   }
 
   Widget buildCustomAppBar(BuildContext context, name, role) {

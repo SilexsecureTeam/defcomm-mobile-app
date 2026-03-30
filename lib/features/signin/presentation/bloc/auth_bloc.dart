@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/material.dart';
 import 'package:defcomm/features/signin/domain/usecases/send_app_config.dart';
 import 'package:defcomm/features/signin/domain/usecases/verify_otp.dart';
 import 'package:device_info_plus/device_info_plus.dart';
@@ -15,7 +17,6 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
 
   AuthBloc({required RequestOtp requestOtp, required VerifyOtp verifyOtp, required SendAppConfig sendAppConfig})
       : _requestOtp = requestOtp, _verifyOtp = verifyOtp, _sendAppConfig = sendAppConfig,
-      
         super(AuthInitial()) {
     on<AuthRequestOtp>((event, emit) async {
       emit(AuthLoading());
@@ -55,6 +56,19 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
             final deviceInfo = await _getDevicePayload();
             
             final configRes = await _sendAppConfig(deviceInfo);
+
+            // Print FCM token on every sign-in so it can be copied from
+            // logcat and pasted directly into the Firebase console for testing.
+            try {
+              final fcmToken = await FirebaseMessaging.instance.getToken();
+              debugPrint("");
+              debugPrint("🔑🔑🔑 FCM TOKEN (sign-in) 🔑🔑🔑");
+              debugPrint(fcmToken ?? 'null - FCM token unavailable');
+              debugPrint("🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑🔑");
+              debugPrint("");
+            } catch (e) {
+              debugPrint("FCM token fetch error: $e");
+            }
             
             configRes.fold(
               (configFailure) {

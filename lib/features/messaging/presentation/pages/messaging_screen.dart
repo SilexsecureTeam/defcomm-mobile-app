@@ -95,6 +95,7 @@ class _MessagingScreenState extends State<MessagingScreen> {
           SafeArea(
             child: Column(
               children: [
+                const SizedBox(height: 36),
                 Padding(
                   padding: const EdgeInsets.only(left: 16.0, right: 16),
                   child: _buildCustomAppBar(context, name, role),
@@ -342,6 +343,7 @@ class _MessagingScreenState extends State<MessagingScreen> {
                             shrinkWrap: true,
                             physics:
                                 const NeverScrollableScrollPhysics(), 
+                            itemCount: state.groups.length,
                             itemBuilder: (context, index) {
                               return GroupTile(group: state.groups[index]);
                             },

@@ -87,11 +87,12 @@ class CallBloc extends Bloc<CallEvent, CallState> {
   final StartCall startCall;
 
   Room? _room;
+  bool _hasEstablished = false;
 
   CallBloc({required this.startCall}) : super(const CallInitial()) {
     on<StartCallRequested>(_onStartCallRequested);
     on<CallEnded>(_onCallEnded);
-    // 🚫 REMOVE RemoteParticipantJoined & _hasEstablished for now
+    on<RemoteParticipantJoined>(_onRemoteParticipantJoined);
   }
 
   Future<void> _onStartCallRequested(
@@ -110,14 +111,40 @@ class CallBloc extends Bloc<CallEvent, CallState> {
       );
 
       _room = room;
+      _hasEstablished = false;
 
-      // ✅ IMPORTANT: emit CallConnected immediately after joining
-      emit(CallConnected(room));
+      // ✅ Emit CallRoomJoined so the caller can send the invite
+      // immediately, but DON'T emit CallConnected yet — that only
+      // fires when a remote participant actually joins.
+      emit(CallRoomJoined(room));
 
-      // (Optional) if you want later:
-      // room.on(Events.participantJoined, (Participant p) { ... });
+      // When someone else joins, mark call as "connected"
+      room.on(Events.participantJoined, (Participant participant) {
+        if (!_hasEstablished) {
+          _hasEstablished = true;
+          add(const RemoteParticipantJoined());
+        }
+      });
+
+      // When the other person leaves the room, end the call
+      room.on(Events.participantLeft, (Participant participant) {
+        if (room.participants.isEmpty) {
+          debugPrint("Participant left - Room is empty, ending call.");
+          add(const CallEnded());
+        }
+      });
     } catch (e) {
       emit(CallError(e.toString()));
+    }
+  }
+
+  void _onRemoteParticipantJoined(
+    RemoteParticipantJoined event,
+    Emitter<CallState> emit,
+  ) {
+    final room = _room;
+    if (room != null) {
+      emit(CallConnected(room));
     }
   }
 
@@ -129,13 +156,14 @@ class CallBloc extends Bloc<CallEvent, CallState> {
       await _room?.leave();
     } catch (_) {}
     _room = null;
+    _hasEstablished = false;
     emit(const CallInitial());
 
     try {
-    serviceLocator<CallManager>().endCall();
-  } catch (e) {
-    debugPrint('Error releasing global call lock in CallBloc: $e');
-  }
+      serviceLocator<CallManager>().endCall();
+    } catch (e) {
+      debugPrint('Error releasing global call lock in CallBloc: $e');
+    }
   }
 }
 

@@ -1,9 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:defcomm/core/constants/base_url.dart';
 import 'package:defcomm/core/di/service_initilaizer.dart';
 import 'package:defcomm/core/error/exception.dart';
 import 'package:defcomm/features/signin/data/models/auth_success_model.dart';
 import 'package:defcomm/features/signin/data/models/login_success_model.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:get_storage/get_storage.dart';
 import 'package:http/http.dart' as http;
@@ -24,18 +26,23 @@ class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
         body: jsonEncode({'phone': phone}),
       );
 
-      final resBody = jsonDecode(response.body);
       debugPrint("response statuscode: ${response.statusCode}");
       debugPrint("response body: ${response.body}");
       box.write("phone", phone);
 
-      if (response.statusCode == 200) {
-        
+      Map<String, dynamic> resBody;
+      try {
+        resBody = jsonDecode(response.body) as Map<String, dynamic>;
+      } catch (_) {
+        throw ServerException(
+          'Server returned an unexpected response (status ${response.statusCode}). Please try again.',
+        );
+      }
 
+      if (response.statusCode == 200) {
         return OtpResponseModel.fromJson(resBody);
       } else {
-
-         final serverMessage = resBody['message'] ??
+        final serverMessage = resBody['message'] ??
           resBody['error'] ??
           (resBody['errors'] is String ? resBody['errors'] : null) ??
           (resBody['errors'] is Map ? jsonEncode(resBody['errors']) : null) ??
@@ -59,18 +66,40 @@ class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
     required String otp,
   }) async {
     try {
+      // Get FCM token with timeout to prevent freeze
+      String? fcmToken;
+      try {
+        fcmToken = await FirebaseMessaging.instance.getToken()
+            .timeout(const Duration(seconds: 3));
+        debugPrint("✅ FCM Token for login: $fcmToken");
+      } catch (e) {
+        debugPrint("⚠️ FCM token fetch failed/timeout: $e");
+        // Continue login without FCM token - it will be sent on next app launch
+      }
+
       final response = await client.post(
         Uri.parse('$baseUrl/loginWithPhone'), 
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'phone': phone,
           'otp': otp,
+          'fcm_token': fcmToken ?? '',
+          'device_token': fcmToken ?? '',
+          'device_type': Platform.isAndroid ? 'android' : 'ios',
         }),
       );
       debugPrint("login response statuscode: ${response.statusCode}");
       debugPrint("login response body: ${response.body}");
 
-      final resBody = jsonDecode(response.body);
+      // Guard: server may return HTML/empty body on 5xx/network errors
+      Map<String, dynamic> resBody;
+      try {
+        resBody = jsonDecode(response.body) as Map<String, dynamic>;
+      } catch (_) {
+        throw ServerException(
+          'Server returned an unexpected response (status ${response.statusCode}). Please try again.',
+        );
+      }
 
       if (response.statusCode == 200 || response.statusCode == 201) {
         final loginDetails = LoginSuccessModel.fromJson(resBody);
@@ -79,13 +108,13 @@ class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
         box.write("phone", loginDetails.user.phone);
         box.write("email", loginDetails.user.email);
         box.write("userEnId", loginDetails.userEnid);
-        box.write("role", resBody['data']['user']['role']);
-        debugPrint("resBody['data']['user']['role']:   ${resBody['data']['user']['role']}");
-      
+        final role = resBody['data']?['user']?['role'];
+        if (role != null) box.write("role", role);
+        debugPrint("role: $role");
 
         await startPusherForUser(token: loginDetails.accessToken, userId: loginDetails.userEnid);
 
-        return LoginSuccessModel.fromJson(resBody);
+        return loginDetails;
       } else {
         final serverMessage = resBody['message'] ??
           resBody['error'] ??
@@ -93,7 +122,7 @@ class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
           (resBody['errors'] is Map ? jsonEncode(resBody['errors']) : null) ??
           response.body;
 
-      throw ServerException(serverMessage);
+        throw ServerException(serverMessage);
       }
     } on ServerException {
       

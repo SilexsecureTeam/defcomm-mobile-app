@@ -28,16 +28,26 @@
     
     <!-- Required for Android 14+ Background Service -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
      <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />  
 
      <uses-permission android:name="android.permission.READ_PHONE_STATE"/> 
     <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    
+    <!-- Required to query all installed apps for launcher app drawer -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" 
+        tools:ignore="QueryAllPackagesPermission" />
 
     <application
         android:label="defcomm"
-        android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:name=".MainApplication"
+        android:icon="@mipmap/ic_launcher"
+        android:persistent="true">
 
         <!-- 1. MAIN FLUTTER ACTIVITY -->
         <activity
@@ -45,18 +55,30 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:taskAffinity=""
+            android:excludeFromRecents="true"
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true">
             
             <meta-data
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            
+            <!-- Standard app launcher -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            
+            <!-- HOME launcher (makes Defcomm selectable as default launcher) -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.HOME"/>
+                <category android:name="android.intent.category.DEFAULT"/>
             </intent-filter>
         </activity>
 
@@ -65,7 +87,7 @@
             android:name="com.hiennv.flutter_callkit_incoming.CallkitIncomingActivity"
             android:theme="@style/Theme.AppCompat.Light.NoActionBar"
             android:launchMode="singleTop"
-            android:showOnLockScreen="true"
+            android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:exported="true"
             tools:replace="android:launchMode,android:theme"> 
@@ -76,20 +98,64 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
-        <!-- 4. BACKGROUND SERVICE -->
-        <!-- <service 
-            android:name="id.flutter.flutter_background_service.BackgroundService" 
+        <!-- 4. FLUTTER FOREGROUND TASK ICON AND SERVICE REGISTRATION -->
+        <meta-data
+            android:name="com.pravera.flutter_foreground_task.NOTIFICATION_ICON"
+            android:resource="@mipmap/ic_launcher" />
+        
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:foregroundServiceType="dataSync"
-            android:exported="true"
-            android:stopWithTask="false" 
-        /> -->
+            android:exported="false" />
 
-        <service 
-            android:name="id.flutter.flutter_background_service.BackgroundService" 
-            android:foregroundServiceType="mediaPlayback" 
+        <!-- FCM: Default notification channel (high priority) -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="defcomm_messages" />
+
+        <!-- FCM: Default notification icon -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@mipmap/ic_launcher" />
+
+        <!-- 4. BACKGROUND SERVICE -->
+        <service
+            android:name="id.flutter.flutter_background_service.BackgroundService"
+            android:foregroundServiceType="mediaPlayback|dataSync"
             android:stopWithTask="false"
             android:exported="true"
         />
+
+        <!-- 4b. WEBSOCKET FOREGROUND SERVICE -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundTaskService"
+            android:foregroundServiceType="connectedDevice"
+            android:stopWithTask="false"
+            android:exported="false"
+        />
+
+        <!-- 5. AUTO-START ON BOOT -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+        </receiver>
+
+        <!-- 6. WAKE SCREEN on incoming call/message (native, no Flutter isolate needed) -->
+        <receiver
+            android:name=".WakeScreenReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="come.deffcom.chatapp.WAKE_SCREEN"/>
+            </intent-filter>
+        </receiver>
 
     </application>
 

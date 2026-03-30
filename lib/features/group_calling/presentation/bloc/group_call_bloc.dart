@@ -476,7 +476,7 @@ class GroupCallBloc extends Bloc<GroupCallEvent, GroupCallState> {
     final cur = state;
     if (cur is GroupCallConnected) {
       final List<GroupParticipant> p = List<GroupParticipant>.from(cur.participants);
-      final idx = p.indexWhere((x) => x.id == evt.partsicipantId);
+      final idx = p.indexWhere((x) => x.id == evt.participantId);
       if (idx != -1) {
         p[idx] = p[idx].copyWith(muted: evt.muted);
         emit(cur.copyWith(participants: p));

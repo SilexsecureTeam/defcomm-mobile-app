@@ -29,6 +29,7 @@ import 'package:defcomm/features/settings/presentation/bloc/settings_bloc.dart';
 import 'package:defcomm/features/settings/presentation/bloc/settings_state.dart';
 import 'package:defcomm/init_dependencies.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_svg/svg.dart';
 import 'package:get_storage/get_storage.dart';
@@ -49,6 +50,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isPlacingCall = false;
 
   StreamSubscription? _connectivitySubscription;
+  StreamSubscription? _pusherMsgSub;
 
   String get myUserId => box.read("userEnId");
 
@@ -63,10 +65,21 @@ class _ChatScreenState extends State<ChatScreen> {
     bloc.add(MessagesFetched(widget.user.id));
 
     if (serviceLocator.isRegistered<PusherService>()) {
-      serviceLocator<PusherService>().setActiveChat(widget.user.id);
+      final pusher = serviceLocator<PusherService>();
+      pusher.setActiveChat(widget.user.id);
+      // Subscribe directly to the broadcast stream — bypasses isThisChatOpen
+      // ID matching which can silently fail on format mismatches.
+      _pusherMsgSub = pusher.incomingPrivateMessages.listen((event) {
+        if (!mounted) return;
+        final isFromThisUser = event.senderId == widget.user.id ||
+            event.message.senderId == widget.user.id;
+        if (isFromThisUser) {
+          context.read<ChatDetailBloc>().add(IncomingMessageEvent(event.message));
+        }
+      });
     }
 
-     _connectivitySubscription = Connectivity().onConnectivityChanged.listen((List<ConnectivityResult> results) {
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen((List<ConnectivityResult> results) {
       // If we have ANY connection (mobile, wifi, ethernet, etc.)
       // and it is NOT 'none'
       if (!results.contains(ConnectivityResult.none)) {
@@ -103,6 +116,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _pusherMsgSub?.cancel();
     if (serviceLocator.isRegistered<PusherService>()) {
       serviceLocator<PusherService>().setActiveChat(null);
     }
@@ -160,14 +174,11 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
 
-    final myIdEn = box.read("userEnId") as String;
-    final otherIdEn = widget.user.id;
-
-
+    String roomId = '';
     try {
 
       final callRepo = serviceLocator<CallRepository>();
-      final String roomId = await callRepo.createMeetingId();
+      roomId = await callRepo.createMeetingId();
 
       debugPrint("✅ VideoSDK Room Ready: $roomId");
 
@@ -204,7 +215,7 @@ class _ChatScreenState extends State<ChatScreen> {
               value: serviceLocator<CallBloc>(),
               child: SecureCallingScreen(
                 isCaller: true,
-                meetingId: null,
+                meetingId: roomId,
                 otherUserName: widget.user.name,
                 peerIdEn: widget.user.id,
               ),
@@ -226,6 +237,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarContrastEnforced: false,
+    ));
     return Scaffold(
       backgroundColor: AppColors.tertiaryGreen,
       body: SafeArea(
@@ -246,6 +263,7 @@ class _ChatScreenState extends State<ChatScreen> {
               children: [
                 Padding(
                   padding: const EdgeInsets.only(
+                    top: 28,
                     left: 5.0,
                     right: 8.0,
                   ),

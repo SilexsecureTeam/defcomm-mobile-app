@@ -1,6 +1,7 @@
 import 'package:defcomm/core/notification/local_notifiction.dart';
 import 'package:defcomm/core/pusher/pusher_service.dart';
 import 'package:defcomm/core/services/background_pusher_service.dart';
+import 'package:defcomm/core/services/ws_foreground_service.dart';
 import 'package:defcomm/features/chat_details/presentation/bloc/chat_detail_bloc.dart';
 import 'package:defcomm/features/group_chat/domain/repositories/group_chat_repository.dart';
 import 'package:defcomm/features/group_chat/presentation/bloc/group_chat_bloc.dart';
@@ -9,8 +10,11 @@ import 'package:defcomm/features/messaging/domain/usecases/get_message_groups.da
 import 'package:defcomm/features/messaging/presentation/bloc/messaging_bloc.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:get_it/get_it.dart';
 import 'package:get_storage/get_storage.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 final serviceLocator = GetIt.instance;
 
@@ -84,22 +88,37 @@ Future<void> startPusherForUser({
     await Future.delayed(const Duration(milliseconds: 500)); 
 
   try {
-    debugPrint("🚀 Launching Background Service...");
-     final service = FlutterBackgroundService();
-    var isRunning = await service.isRunning();
-
-
-    if (!isRunning) {
-        await initializeBackgroundService(token, userId, groupIds);
+    debugPrint("🚀 Launching WebSocket Foreground Service...");
+    final isRunning = await FlutterForegroundTask.isRunningService;
+    if (isRunning) {
+      updateWsServiceUserData(token: token, userId: userId, groupIds: groupIds);
     } else {
-        service.invoke("setUserData", {
-           "token": token,
-           "userId": userId,
-           "groupIds": groupIds
-        });
+      if (!await Permission.notification.isGranted) {
+        await Permission.notification.request();
+      }
+      await startWsForegroundService();
+      await Future.delayed(const Duration(milliseconds: 300));
+      updateWsServiceUserData(token: token, userId: userId, groupIds: groupIds);
     }
   } catch (e) {
-    debugPrint("❌ Failed to start background service: $e");
+    debugPrint("❌ Failed to start WS foreground service: $e");
+  }
+
+  try {
+    debugPrint("🚀 Launching Legacy Background Service (wake-screen)...");
+    final service = FlutterBackgroundService();
+    final isRunning = await service.isRunning();
+    if (!isRunning) {
+      await initializeBackgroundService(token, userId, groupIds);
+    } else {
+      service.invoke("setUserData", {
+        "token": token,
+        "userId": userId,
+        "groupIds": groupIds,
+      });
+    }
+  } catch (e) {
+    debugPrint("❌ Failed to start legacy background service: $e");
   }
 
   try {
@@ -112,16 +131,20 @@ Future<void> startPusherForUser({
 }
 
 Future<void> stopPusherForCurrentUser() async {
-
   if (serviceLocator.isRegistered<PusherService>()) {
     final p = serviceLocator<PusherService>();
     p.dispose();
     serviceLocator.unregister<PusherService>();
   }
 
-  final service = FlutterBackgroundService();
-  var isRunning = await service.isRunning();
-  if (isRunning) {
-    service.invoke("stopService");
+  try { await stopWsForegroundService(); } catch (e) {
+    debugPrint("WS stop error: $e");
+  }
+
+  try {
+    final service = FlutterBackgroundService();
+    if (await service.isRunning()) service.invoke("stopService");
+  } catch (e) {
+    debugPrint("Legacy BG stop error: $e");
   }
 }

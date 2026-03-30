@@ -87,7 +87,7 @@ class GroupChatBloc extends Bloc<GroupChatEvent, GroupChatState> {
         if (state is GroupChatLoaded) {
           final currentMsgs = (state as GroupChatLoaded).messages;
 
-          newMsgList;
+          List<GroupChatMessage> newMsgList;
           if (_currentPage - 1 == 1) {
             newMsgList = page.messages; 
           } else {
