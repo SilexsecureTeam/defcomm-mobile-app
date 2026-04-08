@@ -227,6 +227,13 @@ class ChatDetailBloc extends Bloc<ChatDetailEvent, ChatDetailState> {
           return;
         }
 
+        // Reset typing indicator whenever a new message arrives from the other user
+        if (!msg.isMyChat) {
+          final updated2 = List<ChatMessage>.from(currentState.messages)..insert(0, msg);
+          emit(currentState.copyWith(messages: updated2, isTyping: false));
+          return;
+        }
+
         // 2) If it's *my* message and we've just done optimistic insert+API replace,
         //    it's possible ids differ. You can add a softer dedupe if needed:
         if (msg.isMyChat) {
@@ -254,6 +261,40 @@ class ChatDetailBloc extends Bloc<ChatDetailEvent, ChatDetailState> {
         // no messages yet
         emit(ChatDetailLoaded(messages: [msg], hasReachedMax: true));
       }
+    });
+
+    on<RefreshChatEvent>((event, emit) async {
+      if (_isFetching) return;
+      _isFetching = true;
+      _currentPage = 1;
+
+      final res = await _fetchMessages(
+        FetchMessagesParams(chatUserId: event.chatUserId, page: 1),
+      );
+
+      res.fold(
+        (failure) {
+          debugPrint('Chat refresh failed: ${failure.message}');
+          _isFetching = false;
+        },
+        (chatPage) {
+          _currentPage = 2;
+          _isFetching = false;
+          final current = state;
+          if (current is ChatDetailLoaded) {
+            emit(current.copyWith(
+              messages: chatPage.messages,
+              hasReachedMax: !chatPage.hasMorePages,
+              isTyping: false,
+            ));
+          } else {
+            emit(ChatDetailLoaded(
+              messages: chatPage.messages,
+              hasReachedMax: !chatPage.hasMorePages,
+            ));
+          }
+        },
+      );
     });
 
     on<UpdateTypingEvent>((event, emit) {

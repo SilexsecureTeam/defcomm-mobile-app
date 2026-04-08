@@ -51,6 +51,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   StreamSubscription? _connectivitySubscription;
   StreamSubscription? _pusherMsgSub;
+  StreamSubscription? _chatRefreshSub;
 
   String get myUserId => box.read("userEnId");
 
@@ -76,6 +77,10 @@ class _ChatScreenState extends State<ChatScreen> {
         if (isFromThisUser) {
           context.read<ChatDetailBloc>().add(IncomingMessageEvent(event.message));
         }
+      });
+      _chatRefreshSub = pusher.chatRefreshStream.listen((_) {
+        if (!mounted) return;
+        context.read<ChatDetailBloc>().add(RefreshChatEvent(widget.user.id));
       });
     }
 
@@ -117,6 +122,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _pusherMsgSub?.cancel();
+    _chatRefreshSub?.cancel();
     if (serviceLocator.isRegistered<PusherService>()) {
       serviceLocator<PusherService>().setActiveChat(null);
     }

@@ -54,3 +54,10 @@ class LoadCachedMessages extends ChatDetailEvent {
   @override
   List<Object> get props => [messages];
 }
+
+class RefreshChatEvent extends ChatDetailEvent {
+  final String chatUserId;
+  const RefreshChatEvent(this.chatUserId);
+  @override
+  List<Object> get props => [chatUserId];
+}

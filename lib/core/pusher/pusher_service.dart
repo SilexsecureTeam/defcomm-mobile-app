@@ -100,6 +100,12 @@ class PusherService {
   Stream<({String senderId, ChatMessage message})> get incomingPrivateMessages =>
       _incomingMsgController.stream;
 
+  /// Fires whenever the active chat thread has a new last_message so the
+  /// ChatScreen can trigger a page-1 refresh without polling.
+  final StreamController<void> _chatRefreshController =
+      StreamController<void>.broadcast();
+  Stream<void> get chatRefreshStream => _chatRefreshController.stream;
+
   /// Call this from ChatScreen when opening/closing a chat
   void setActiveChat(String? chatUserId) {
     _activeChatId = chatUserId;
@@ -388,6 +394,49 @@ class PusherService {
         (root['sender']?['id'] ?? innerData['user_id'] ?? '').toString();
     final String senderName = (root['sender']?['name'] ?? 'Unknown').toString();
 
+    // ── Group Call Signals ──────────────────────────────────────────────────
+    final String msgContent = (innerData['message'] ?? '').toString();
+    if (senderId != currentUserId) {
+      if (msgContent.startsWith(kGroupCallInvitePrefix)) {
+        final String roomId = msgContent.replaceFirst(kGroupCallInvitePrefix, '');
+        if (roomId.isNotEmpty) {
+          final String groupId =
+              backendGroupId.isNotEmpty ? backendGroupId : channelTargetId;
+          final String groupName =
+              (root['group_name'] ?? innerData['group_name'] ?? 'Group Call')
+                  .toString();
+          final String myDisplay =
+              GetStorage().read('userName') ?? GetStorage().read('name') ?? 'User';
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            navigatorKey.currentState?.push(MaterialPageRoute(
+              settings: const RouteSettings(name: 'group_call'),
+              builder: (_) => BlocProvider.value(
+                value: serviceLocator<GroupCallBloc>(),
+                child: GroupCallScreen(
+                  groupId: groupId,
+                  roomId: roomId,
+                  isCreator: false,
+                  groupName: groupName,
+                  displayName: myDisplay,
+                  autoJoin: false,
+                ),
+              ),
+            ));
+          });
+          return;
+        }
+      }
+      if (msgContent == kGroupCallEnded) {
+        FlutterRingtonePlayer().stop();
+        serviceLocator<GroupCallBloc>().add(GroupCallEndedEvent());
+        navigatorKey.currentState?.popUntil(
+          (route) => route.settings.name != 'group_call',
+        );
+        return;
+      }
+    }
+    // ────────────────────────────────────────────────────────────────────────
+
     // 2. CHECK IF CHAT IS OPEN
     bool isChatOpen = false;
     String effectiveGroupId =
@@ -553,6 +602,14 @@ if (stateStr == 'last_message') {
               useProvidedUnreadCount: true, 
             ),
           );
+
+          // 6. If this thread belongs to the currently open chat, signal refresh
+          final String finalOtherId = (threadMap['chat_user_to_id'] ?? '').toString();
+          if (_activeChatId != null &&
+              finalOtherId == _activeChatId &&
+              !_chatRefreshController.isClosed) {
+            _chatRefreshController.add(null);
+          }
         } catch (e) {
           debugPrint("Error parsing thread item: $e");
         }
@@ -606,53 +663,47 @@ if (stateStr == 'last_message') {
 
     // ============= 5. Typing Indicators =============
     if (stateStr == 'is_typing' || stateStr == 'not_typing') {
-      chatDetailBloc.add(
-        UpdateTypingEvent(userId: senderId, isTyping: stateStr == 'is_typing'),
-      );
+      final String actualSenderId =
+          (baseMap['sender_iden'] ?? senderId).toString();
+      final bool isTyping = stateStr == 'is_typing';
 
-      
+      // Only update the chat-detail bloc if this typing event is from the
+      // person currently open in the ChatScreen (avoids showing the wrong
+      // typing indicator when multiple chats are active in the background).
+      final bool isForActiveChat = _activeChatId != null &&
+          (actualSenderId == _activeChatId ||
+              senderId == _activeChatId ||
+              receiverId == _activeChatId);
 
-      debugPrint("senderId: ${rawData}");
-      debugPrint("basemap: ${baseMap}");
-      final String actualSenderId = (baseMap['sender_iden'] ?? '').toString();
-      
-
-      debugPrint(
-        "🔍 Extracted Sender ID for Typing: '$actualSenderId'",
-      ); // Debug check
-
-      if (actualSenderId.isNotEmpty) {
-        bool isTyping = stateStr == 'is_typing';
-        debugPrint(
-          "💬 Typing Status Update: User $actualSenderId isTyping=$isTyping",
+      if (isForActiveChat || _activeChatId == null) {
+        chatDetailBloc.add(
+          UpdateTypingEvent(userId: actualSenderId, isTyping: isTyping),
         );
-
-        // 3. Emit Event
-        _typingController.add(
-          TypingStatus(userId: actualSenderId, isTyping: isTyping)
-        );
-
-        // Auto-reset after 5 seconds (Safety)
+        // Auto-reset typing in chatDetailBloc after 5 s if no not_typing follows
         if (isTyping) {
           Future.delayed(const Duration(seconds: 5), () {
-             if (!_typingController.isClosed) {
-                _typingController.add(TypingStatus(userId: actualSenderId, isTyping: false));
-             }
+            chatDetailBloc.add(
+              UpdateTypingEvent(userId: actualSenderId, isTyping: false),
+            );
           });
         }
       }
 
-      
+      if (!_typingController.isClosed) {
+        _typingController.add(TypingStatus(userId: actualSenderId, isTyping: isTyping));
+        if (isTyping) {
+          Future.delayed(const Duration(seconds: 5), () {
+            if (!_typingController.isClosed) {
+              _typingController.add(TypingStatus(userId: actualSenderId, isTyping: false));
+            }
+          });
+        }
+      }
 
       if (actualSenderId.isNotEmpty &&
           serviceLocator.isRegistered<MessagingBloc>()) {
-        final messagingBloc = serviceLocator<MessagingBloc>();
-
-        messagingBloc.add(
-          UserTypingEvent(actualSenderId, stateStr == 'is_typing'),
-        );
-
-        if (stateStr == 'is_typing') {
+        messagingBloc.add(UserTypingEvent(actualSenderId, isTyping));
+        if (isTyping) {
           Future.delayed(const Duration(seconds: 5), () {
             messagingBloc.add(UserTypingEvent(actualSenderId, false));
           });

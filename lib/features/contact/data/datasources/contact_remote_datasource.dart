@@ -19,18 +19,25 @@ class ContactRemoteDataSourceImpl implements ContactRemoteDataSource {
 
   @override
   Future<void> addContact(String contactId, {String? note}) async {
-
     final token = box.read("accessToken");
-     final response = await client.get(
-      Uri.parse("$baseUrl/user/contact/add/$contactId"),
-      headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer $token'},
-    );
 
+    final queryParams = <String, String>{};
+    if (note != null && note.isNotEmpty) queryParams['note'] = note;
+
+    final uri = Uri.parse("$baseUrl/user/contact/add/$contactId")
+        .replace(queryParameters: queryParams.isNotEmpty ? queryParams : null);
+
+    final response = await client.get(
+      uri,
+      headers: {'Authorization': 'Bearer $token'},
+    );
 
     if (response.statusCode == 200 || response.statusCode == 201) {
       return;
     } else {
-      throw ServerFailure('Failed to add contact (${response.statusCode})');
+      throw ServerFailure(
+        'Failed to add contact (${response.statusCode}): ${response.body}',
+      );
     }
   }
 }

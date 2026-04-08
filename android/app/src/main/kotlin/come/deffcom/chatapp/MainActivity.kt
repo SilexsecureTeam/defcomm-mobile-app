@@ -8,6 +8,8 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.view.View
+import android.app.NotificationManager
+import android.os.PowerManager
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
@@ -81,15 +83,50 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // Register WakePlugin as a proper FlutterPlugin so the main engine
-        // has the wakeScreen / canUseFullScreenIntent / requestFullScreenIntentPermission
-        // handlers via the v2 embedding API.
-        flutterEngine.plugins.add(WakePlugin())
-
-        // OEM battery settings channel — wakeScreen is now handled by WakePlugin
+        // OEM battery / wake-screen / full-screen-intent channel
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, OEM_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "wakeScreen" -> {
+                        try {
+                            @Suppress("DEPRECATION")
+                            val wl = (getSystemService(POWER_SERVICE) as PowerManager)
+                                .newWakeLock(
+                                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK
+                                            or PowerManager.ACQUIRE_CAUSES_WAKEUP
+                                            or PowerManager.ON_AFTER_RELEASE,
+                                    "defcomm:wakeScreen"
+                                )
+                            wl.acquire(10_000L)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("WAKE_FAILED", e.message, null)
+                        }
+                    }
+                    "canUseFullScreenIntent" -> {
+                        if (Build.VERSION.SDK_INT >= 34) {
+                            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                            result.success(nm.canUseFullScreenIntent())
+                        } else {
+                            result.success(true)
+                        }
+                    }
+                    "requestFullScreenIntentPermission" -> {
+                        if (Build.VERSION.SDK_INT >= 34) {
+                            try {
+                                val i = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
+                                    data = Uri.parse("package:$packageName")
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                startActivity(i)
+                                result.success(true)
+                            } catch (e: Exception) {
+                                result.error("OPEN_FAILED", e.message, null)
+                            }
+                        } else {
+                            result.success(true)
+                        }
+                    }
                     "openOemBatterySettings" -> {
                         val opened = tryOpenOemSettings()
                         if (!opened) {
