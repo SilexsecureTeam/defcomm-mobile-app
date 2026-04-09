@@ -92,8 +92,7 @@ class PusherService {
 
   /// Broadcast stream that emits every incoming private (non-group) chat message
   /// together with the sender's encrypted ID. ChatScreen subscribes to this to
-  /// receive live updates without re\
-  ying on the isThisChatOpen ID-match logic.
+  /// receive live updates without relying on the isThisChatOpen ID-match logic.
   final StreamController<({String senderId, ChatMessage message})>
       _incomingMsgController =
       StreamController<({String senderId, ChatMessage message})>.broadcast();
